@@ -326,12 +326,17 @@ def version_of(path: str, flags: Iterable[str]) -> str:
     """The first version-shaped token a tool prints in its first three lines.
 
     Stdin is closed, so a tool that reads it gets an empty column, not a stall.
+    Spawned through the platform seam, as the fuel probe spawns it, so a row
+    that says "ok" names a tool fleet can also run.
     """
     for flag in flags:
         try:
-            done = subprocess.run([path, flag], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            spawn = fleet_platform.spawnable([path, flag])
+            if spawn is None:
+                continue
+            done = subprocess.run(spawn, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT, encoding="utf-8", errors="replace", check=False)
-        except OSError:
+        except (OSError, ValueError):
             continue
         found = VERSION.search("\n".join(done.stdout.splitlines()[:3]))
         if found:

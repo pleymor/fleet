@@ -67,6 +67,66 @@ class ShellCommands(TempDirCase):
         self.assertEqual(json.loads(result.stdout), values)
 
 
+class Spawnable(TempDirCase):
+    """A tool on PATH is run as preflight finds it: a Windows `.cmd` included."""
+
+    ARGS = ["--provider", "claude,codex", "a b", "x&y|z", "(p)", "^caret", "<in>", ""]
+
+    def _probe(self) -> Path:
+        probe = self.tmp / "probe.py"
+        probe.write_text("import json, sys\nprint(json.dumps(sys.argv[1:]))\n", encoding="utf-8")
+        return probe
+
+    def test_a_missing_tool_is_none(self):
+        self.assertIsNone(fp.spawnable(["no-such-tool-anywhere"], {"PATH": str(self.tmp)}))
+
+    def test_the_path_searched_is_the_childs_environment(self):
+        name = "fleet-probe" + (".cmd" if WINDOWS else "")
+        tool = self.tmp / name
+        tool.write_text("@exit /b 0\r\n" if WINDOWS else "#!/bin/sh\nexit 0\n", encoding="utf-8")
+        tool.chmod(0o755)
+        self.assertIsNone(fp.spawnable(["fleet-probe"], {"PATH": str(self.tmp / "elsewhere")}))
+        self.assertIsNotNone(fp.spawnable(["fleet-probe"], {"Path": str(self.tmp)}))
+
+    @unittest.skipIf(WINDOWS, "the POSIX branch")
+    def test_posix_runs_the_resolved_path_with_the_arguments_untouched(self):
+        tool = self.tmp / "fleet-probe"
+        tool.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(self._probe()))} \"$@\"\n",
+                        encoding="utf-8")
+        tool.chmod(0o755)
+        spawn = fp.spawnable(["fleet-probe", *self.ARGS], {"PATH": str(self.tmp)})
+        self.assertEqual(spawn, [str(tool), *self.ARGS])
+        import json
+
+        out = subprocess.run(spawn, capture_output=True, text=True, encoding="utf-8", check=True).stdout
+        self.assertEqual(json.loads(out), self.ARGS)
+
+    @unittest.skipUnless(WINDOWS, "the cmd.exe branch")
+    def test_a_cmd_shim_alone_runs_and_gets_every_argument_whole(self):
+        """npm's shape: `tool.cmd` and no `tool.exe`, which a bare-name spawn never finds."""
+        (self.tmp / "fleet-probe.cmd").write_text(
+            f'@"{sys.executable}" "{self._probe()}" %*\r\n', encoding="utf-8")
+        with self.assertRaises(FileNotFoundError):
+            subprocess.run(["fleet-probe"], env={**os.environ, "PATH": str(self.tmp)}, capture_output=True)
+        spawn = fp.spawnable(["fleet-probe", *self.ARGS], {"PATH": str(self.tmp)})
+        import json
+
+        out = subprocess.run(spawn, capture_output=True, text=True, encoding="utf-8", check=True).stdout
+        self.assertEqual(json.loads(out), self.ARGS)
+
+    @unittest.skipUnless(WINDOWS, "the cmd.exe branch")
+    def test_a_cmd_shim_refuses_what_cmd_reads_inside_quotes(self):
+        (self.tmp / "fleet-probe.cmd").write_text("@exit /b 0\r\n", encoding="utf-8")
+        for word in ('say "hi"', "%PATH%", "bang!", "two\nlines"):
+            with self.subTest(word=word), self.assertRaises(ValueError):
+                fp.spawnable(["fleet-probe", word], {"PATH": str(self.tmp)})
+
+    @unittest.skipUnless(WINDOWS, "the cmd.exe branch")
+    def test_an_exe_is_run_directly_with_no_cmd_in_between(self):
+        spawn = fp.spawnable([sys.executable, "-c", "pass"])
+        self.assertEqual(spawn, [sys.executable, "-c", "pass"])
+
+
 class Directories(TempDirCase):
     def test_thurbox_config_dir_honours_thurbox_own_pin(self):
         with environ(THURBOX_CONFIG_DIR=str(self.tmp / "pinned"), XDG_CONFIG_HOME=str(self.tmp / "xdg")):

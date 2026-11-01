@@ -514,6 +514,46 @@ def run_bounded(argv: list[str], secs: float, input: str | None = None, on_start
     return subprocess.CompletedProcess(argv, proc.returncode, out, errs)
 
 
+# The scripts Windows runs only through cmd.exe: npm, and every CLI npm
+# installs, is one of these and has no `.exe`.
+CMD_SCRIPTS = (".cmd", ".bat")
+# What cmd.exe still reads inside double quotes: `%` and `!` expand, a quote
+# ends the quoting, and a line break ends the command.
+CMD_UNSAFE = re.compile(r'["%!\r\n\x00]')
+
+
+def spawnable(argv: list[str], env: dict | None = None) -> list[str] | str | None:
+    """`argv` as `subprocess` must be handed it to run, or None when it is not on PATH.
+
+    The program is resolved the way `shutil.which` resolves it, through the
+    PATH of `env` (the child's whole environment) or of this process, so
+    preflight's "ok" and a spawn cannot disagree. POSIX: the resolved path,
+    then the arguments. Windows: the same for an `.exe`; CreateProcess appends
+    `.exe` to a bare name and nothing else, so a bare `quota-axi` never finds
+    the `quota-axi.cmd` npm installed. A `.cmd` or `.bat` runs under
+    `cmd.exe /d /s /c` as one command line, every word in double quotes, so
+    `&`, `|`, `,` and spaces reach the script as text. Raises ValueError for an
+    argument cmd.exe would still read inside quotes (CMD_UNSAFE): no quoting
+    passes it through literally, and a mangled argument is worse than none.
+    """
+    search = None
+    if env is not None:
+        search = next((v for k, v in env.items() if k.upper() == "PATH"), "")
+    found = shutil.which(argv[0], path=search)
+    if not found:
+        return None
+    if not WINDOWS or os.path.splitext(found)[1].lower() not in CMD_SCRIPTS:
+        return [found, *argv[1:]]
+    words = [found, *argv[1:]]
+    for word in words:
+        if CMD_UNSAFE.search(word):
+            raise ValueError(f"{argv[0]} is a cmd.exe script, which cannot be passed {word!r} literally")
+    comspec = os.environ.get("ComSpec") or os.path.join(
+        os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe")
+    line = " ".join(f'"{word}"' for word in words)
+    return f'"{comspec}" /d /s /c "{line}"'
+
+
 def shell_command(argv: list[str], windows: bool = WINDOWS) -> str:
     """A command delivered to a POSIX shell or native Windows PowerShell.
 

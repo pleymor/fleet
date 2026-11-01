@@ -20,6 +20,7 @@ import hashlib
 import json
 from datetime import datetime
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -444,6 +445,35 @@ def test_fuel_flag_carries_one_record_per_provider_from_one_fetch(stubs):
         assert b["reserve"] == "20"
         assert b["read_at"] == blocks[0]["read_at"]
     assert len(fetches(stubs)) == 1
+
+
+@pytest.mark.skipif(os.name != "nt", reason="a .cmd shim is how npm installs a CLI on Windows only")
+def test_fuel_reads_a_quota_axi_npm_installed_as_a_cmd_shim_only(stubs, tmp_path):
+    """npm installs quota-axi on Windows as `quota-axi.cmd`, with no `.exe`.
+    CreateProcess appends `.exe` to a bare name and nothing else, so a bare
+    `quota-axi` spawn failed with "file not found" while preflight, which
+    resolves through PATHEXT, said `ok`. The provider list carries a comma,
+    which cmd.exe would split if the shim got it unquoted."""
+    stubs.tool("quota-axi", MANY)
+    hidden = tmp_path / "quota-axi-real"
+    hidden.mkdir()
+    shutil.copy2(shutil.which("fleet-stub"), hidden / "quota-axi.exe")
+    shims = tmp_path / "npm"
+    shims.mkdir()
+    (shims / "quota-axi.cmd").write_text(f'@"{hidden / "quota-axi.exe"}" %*\r\n', encoding="utf-8")
+    rest = [d for d in os.environ["PATH"].split(os.pathsep)
+            if d and not (Path(d) / "quota-axi.exe").exists()]
+    path = os.pathsep.join([str(shims), *rest])
+    assert shutil.which("quota-axi", path=path).lower().endswith(".cmd"), "the stub .exe is still on PATH"
+
+    done = status("--fuel", PATH=path)
+
+    assert done.code == 0, done.out
+    refute(done.out, "unavailable\tquota-axi")
+    blocks = records(done.stdout)
+    assert [b["provider"] for b in blocks] == ["claude", "codex", "zai"], done.out
+    assert blocks[0]["remaining"] == "64"
+    expect(fetches(stubs)[0], "--provider claude,codex,zai")
 
 
 # --- 6d. WHICH provider is the operator's setting, never a name in the code ---

@@ -75,8 +75,6 @@ import argparse
 import importlib.util
 import json
 import os
-import shutil
-import subprocess
 import sys
 import threading
 import time
@@ -107,6 +105,10 @@ fleetqueue = _load_queue()
 # SAME module object, so this file and `fleet queue` resolve a per-agent
 # setting one way and not two.
 agent_settings = fleetqueue.agent_settings
+
+# The PLATFORM seam, the same module object queue.py loaded: how a tool on
+# PATH is resolved and run, so preflight and every probe here agree.
+fleet_platform = fleetqueue.fleet_platform
 
 # The forge seam, which queue.py has already loaded and keyed in sys.modules —
 # so this is the SAME module object and therefore the same registry, not a
@@ -145,15 +147,21 @@ def run(argv: list, cwd: str | None = None, timeout: int = 10,
     caller, and None means this process's — which is what every probe here but
     the fuel gauge wants.
     """
-    if not shutil.which(argv[0]):
+    try:
+        spawn = fleet_platform.spawnable(argv, env)
+    except ValueError as exc:
+        return None, str(exc)
+    if spawn is None:
         return None, f"{argv[0]} not found"
     try:
-        p = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True,
-                           encoding="utf-8", timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return None, f"{argv[0]} timed out after {timeout}s"
+        # Bounded as a tree: a Windows `.cmd` runs its program under cmd.exe,
+        # and a timeout that ended cmd.exe alone would leave it holding the pipe.
+        p = fleet_platform.run_bounded(spawn, timeout, capture_output=True, cwd=cwd, env=env,
+                                       text=True, encoding="utf-8")
     except OSError as exc:
         return None, f"{argv[0]}: {exc.strerror or exc}"
+    if p is None:
+        return None, f"{argv[0]} timed out after {timeout}s"
     if p.returncode != 0:
         detail = (p.stderr or p.stdout or "").strip().splitlines()
         return None, f"{argv[0]} exited {p.returncode}" + (f": {detail[0]}" if detail else "")
